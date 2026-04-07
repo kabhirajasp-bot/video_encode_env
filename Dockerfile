@@ -91,8 +91,25 @@ ENV VIDEO_ENCODE_VIDEOS_DIR=/app/env/videos
 
 # curl (healthcheck) + ffmpeg/ffprobe (encode + VMAF)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends curl ca-certificates xz-utils && \
+    rm -rf /var/lib/apt/lists/* && \
+    ARCH="$(uname -m)" && \
+    case "$ARCH" in \
+        x86_64)   FFARCH=amd64 ;; \
+        aarch64)  FFARCH=arm64 ;; \
+        *) echo "unsupported architecture for static ffmpeg: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${FFARCH}-static.tar.xz" \
+        | tar xJ -C /tmp && \
+    FDIR="$(find /tmp -maxdepth 1 -type d -name 'ffmpeg-*-'"${FFARCH}"'-static' | head -1)" && \
+    test -n "$FDIR" && test -x "$FDIR/ffmpeg" && test -x "$FDIR/ffprobe" && \
+    cp "$FDIR/ffmpeg" "$FDIR/ffprobe" /usr/local/bin/ && \
+    chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    rm -rf "$FDIR" && \
+    ffmpeg -version | head -1 && \
+    ffmpeg -filters 2>&1 | grep -q libvmaf
+
+
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -sf "http://127.0.0.1:${PORT:-8000}/health" || exit 1

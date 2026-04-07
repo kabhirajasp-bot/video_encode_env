@@ -11,7 +11,7 @@ Observations include segment index, DQ-style previous-segment predictions,
 and ffprobe-based whole-video analysis dicts.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from openenv.core.env_server.types import Action, Observation
 from pydantic import Field
@@ -22,6 +22,10 @@ class VideoEncodeAction(Action):
 
     crf: int = Field(23, ge=0, le=51, description="libx264 CRF")
     preset: str = Field("medium", description="libx264 preset, e.g. fast, medium, slow")
+    task_id: Literal["easy", "medium", "hard"] = Field(
+        "hard",
+        description="Grader level: 'easy' (encode validity), 'medium' (rate-distortion efficiency), 'hard' (full quality-time-bitrate reward)",
+    )
     video_index: Optional[int] = Field(
         None,
         description="Index into the init video list; default uses current episode video from reset",

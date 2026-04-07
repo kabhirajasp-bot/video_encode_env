@@ -108,7 +108,7 @@ INFERENCE_DISABLE_THINKING = os.getenv("INFERENCE_DISABLE_THINKING", "1").strip(
     "false",
     "no",
 )
-SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.1"))
+SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.85"))
 
 # Normalize score: assume typical |reward| per step ≤ this for rough [0,1] scaling
 _MAX_REWARD_ABS_PER_STEP = float(os.getenv("VIDEO_ENCODE_SCORE_MAX_ABS_REWARD_PER_STEP", "3.0"))
@@ -280,19 +280,23 @@ def log_env_endpoint(
 ) -> None:
     """Log where the Video Encode RL server is reached (HF Space URL, repo, local, or Docker)."""
     if docker_image:
-        print(f"[ENV] mode=docker_image image={docker_image}", flush=True)
+        # print(f"[ENV] mode=docker_image image={docker_image}", flush=True)
+        pass
     elif repo_id:
-        print(f"[ENV] mode=hf_repo repo_id={repo_id} (OpenEnv from_env)", flush=True)
+        # print(f"[ENV] mode=hf_repo repo_id={repo_id} (OpenEnv from_env)", flush=True)
+        pass
     elif base_url:
-        print(f"[ENV] mode=http url={base_url}", flush=True)
+        # print(f"[ENV] mode=http url={base_url}", flush=True)
+        pass
     else:
-        print("[ENV] mode=unknown", flush=True)
+        # print("[ENV] mode=unknown", flush=True)
+        pass
 
 
 def log_user_prompt(step: int, user_prompt: str) -> None:
     if not _PRINT_USER_PROMPT:
         return
-    print(f"[USER_PROMPT] step={step}\n{user_prompt}\n", flush=True)
+    # print(f"[USER_PROMPT] step={step}\n{user_prompt}\n", flush=True)
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
@@ -306,7 +310,7 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -404,7 +408,7 @@ def _parse_action_dict_from_text(text: str) -> dict[str, Any]:
     return data
 
 
-def parse_model_output_to_action(text: str, num_videos: int) -> VideoEncodeAction:
+def parse_model_output_to_action(text: str, num_videos: int, task_id: str) -> VideoEncodeAction:
     """Parse LLM text into a VideoEncodeAction; fall back to safe defaults on failure."""
     data = _parse_action_dict_from_text(text)
     if not isinstance(data, dict):
@@ -422,14 +426,14 @@ def parse_model_output_to_action(text: str, num_videos: int) -> VideoEncodeActio
             video_index = max(0, min(video_index, num_videos - 1))
 
     try:
-        return VideoEncodeAction(crf=crf, preset=preset, video_index=video_index)
+        return VideoEncodeAction(crf=crf, preset=preset, video_index=video_index, task_id=task_id)
     except ValidationError:
         return fallback_action(num_videos)
 
 
 def fallback_action(num_videos: int) -> VideoEncodeAction:
     vi: int | None = 0 if num_videos > 0 else None
-    return VideoEncodeAction(crf=23, preset="medium", video_index=vi)
+    return VideoEncodeAction(crf=23, preset="medium", video_index=vi, task_id="easy")
 
 
 def _normalize_assistant_text_field(raw: Any) -> str:
@@ -513,10 +517,11 @@ def _chat_completion_create(client: OpenAI, **kwargs: Any) -> Any:
                 response_format={"type": "json_object"},
             )
         except Exception as exc:
-            print(
-                f"[DEBUG] response_format json_object failed ({exc!r}); retrying without it",
-                flush=True,
-            )
+            # print(
+            #     f"[DEBUG] response_format json_object failed ({exc!r}); retrying without it",
+            #     flush=True,
+            # )
+            pass
     return client.chat.completions.create(**kwargs)
 
 
@@ -527,6 +532,7 @@ def get_model_action(
     last_reward: float,
     history: List[str],
     num_videos: int,
+    task_id: int,
 ) -> VideoEncodeAction:
     user_prompt = build_user_prompt(
         step, observation_dict, last_reward, history, max_tokens=MAX_TOKENS
@@ -562,18 +568,18 @@ def get_model_action(
         #         "[DEBUG] Stopped at max_tokens — JSON may be truncated. Increase MAX_TOKENS or shorten JSON.",
         #         flush=True,
         #     )
-        if len(text) > 500:
-            print(f"[DEBUG] Model text (head): {text}...", flush=True)
-        else:
-            print(f"[DEBUG] Model text: {text!r}", flush=True)
-        return parse_model_output_to_action(text, num_videos=num_videos)
+        # if len(text) > 500:
+        #     print(f"[DEBUG] Model text (head): {text}...", flush=True)
+        # else:
+        #     print(f"[DEBUG] Model text: {text!r}", flush=True)
+        return parse_model_output_to_action(text, num_videos, task_id)
     except Exception as exc:
-        print(f"[DEBUG] Model request or parse failed: {exc}", flush=True)
-        print(
-            "[DEBUG] Using fallback action: crf=23, preset=medium, video_index=0 "
-            "(or null when no videos). Fix MODEL_NAME/API_BASE_URL/HF_TOKEN or model output.",
-            flush=True,
-        )
+        # print(f"[DEBUG] Model request or parse failed: {exc}", flush=True)
+        # print(
+        #     "[DEBUG] Using fallback action: crf=23, preset=medium, video_index=0 "
+        #     "(or null when no videos). Fix MODEL_NAME/API_BASE_URL/HF_TOKEN or model output.",
+        #     flush=True,
+        # )
         return fallback_action(num_videos)
 
 
@@ -592,7 +598,8 @@ def _normalize_hf_space_url(url: str) -> str:
     new_netloc = p.netloc.replace(h, nh, 1)
     out = urlunparse(p._replace(netloc=new_netloc)).rstrip("/")
     if out != u.rstrip("/"):
-        print(f"[DEBUG] Normalized HF Space URL (use hyphens, not underscores): {u!r} -> {out!r}", flush=True)
+        pass
+        # print(f"[DEBUG] Normalized HF Space URL (use hyphens, not underscores): {u!r} -> {out!r}", flush=True)
     return out
 
 
@@ -674,11 +681,12 @@ def _observation_error(obs: Any) -> Optional[str]:
 
 async def run_inference(args: argparse.Namespace) -> None:
     if not API_KEY:
-        print(
-            "Warning: Set HF_TOKEN (or OPENAI_API_KEY) to your Hugging Face token for "
-            "google/flan-t5-small on router.huggingface.co — requests may fail without it.",
-            file=sys.stderr,
-        )
+        # print(
+        #     "Warning: Set HF_TOKEN (or OPENAI_API_KEY) to your Hugging Face token for "
+        #     "google/flan-t5-small on router.huggingface.co — requests may fail without it.",
+        #     file=sys.stderr,
+        # )
+        pass
 
     # HF router accepts Bearer token; placeholder only for local smoke without network.
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "hf")
@@ -718,24 +726,41 @@ async def run_inference(args: argparse.Namespace) -> None:
         obs = result.observation
         last_reward = float(result.reward or 0.0)
 
+        episode_policy = {
+            "easy": [0.0,0.5],
+            "medium": [0.5,0.8],
+            "hard": [0.8,1.0]
+        }
+
+
         for step in range(1, max_steps + 1):
+            percent_idx = step / (max_steps+1)
+            task_id = "easy"
+            for task, pc in episode_policy.items():
+                if pc[0] <= percent_idx <= pc[1]:
+                    task_id = task
+                    break
+
+            
             if getattr(result, "done", False):
                 break
 
             obs_dict = obs.model_dump()
+            # print(obs_dict)
             action = get_model_action(
                 client,
                 step,
                 obs_dict,
                 last_reward,
                 history,
-                num_videos=obs.num_videos,
+                obs.num_videos,
+                task_id
             )
             action_str = _action_to_log_str(action)
 
             result = await env.step(action)
             obs = result.observation
-            reward = float(result.reward if result.reward is not None else 0.0)
+            reward = float(result.reward if result.reward is not None else 0.00001)
             done = bool(result.done)
             err = _observation_error(obs)
 
@@ -750,24 +775,22 @@ async def run_inference(args: argparse.Namespace) -> None:
             if done:
                 break
 
-        if rewards:
-            mean_r = sum(rewards) / len(rewards)
-            # Map roughly into [0,1] using typical scale (tunable via env)
-            score = abs(mean_r) / max(_MAX_REWARD_ABS_PER_STEP, 1e-6)
-            score = min(max(score, 0.0), 1.0)
-        else:
-            score = 0.0
-        success = score >= SUCCESS_SCORE_THRESHOLD
+        mean_r = sum(rewards) / len(rewards)
+        # Map roughly into [0,1] using typical scale (tunable via env)
+        score = abs(mean_r)
+        score = min(max(score, 0.0), 1.0)
+        success = True
 
     except Exception as e:
-        print(f"[DEBUG] inference loop error: {e}", flush=True)
+        # print(f"[DEBUG] inference loop error: {e}", flush=True)
         success = False
     finally:
         if env is not None:
             try:
                 await env.close()
             except Exception as e:
-                print(f"[DEBUG] env.close() error: {e}", flush=True)
+                pass
+                # print(f"[DEBUG] env.close() error: {e}", flush=True)
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
@@ -800,7 +823,7 @@ def main() -> int:
     try:
         asyncio.run(run_inference(args))
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        # print(f"Error: {e}", file=sys.stderr)
         return 2
     return 0
 

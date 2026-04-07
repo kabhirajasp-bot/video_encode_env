@@ -326,3 +326,6 @@ def build_segment_features(
         "height": h,
         "file_size_bytes": segment_path.stat().st_size,
     }
+
+if __name__ == "__main__":
+    vmaf_score("./videos/sample_video.mp4", "./videos/sample_video.mp4", 1000)

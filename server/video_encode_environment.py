@@ -132,7 +132,7 @@ def _encode_time_budget_sec(segment_duration_sec: float, ffmpeg_timeout_sec: flo
 
 
 def _timeout_from_env() -> float | None:
-    raw = os.environ.get("VIDEO_ENCODE_FFMPEG_TIMEOUT_SEC", "600")
+    raw = os.environ.get("VIDEO_ENCODE_FFMPEG_TIMEOUT_SEC", "7000")
     if raw.strip() == "":
         return None
     return float(raw)
@@ -144,8 +144,6 @@ def _reward_config_from_env() -> dict[str, float]:
         "lambda_t": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_T", "0.5")),
         "lambda_s": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_S", "0.3")),
         "lambda_c": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_C", "0.1")),
-        "lambda_easy": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_EASY", "0.0")),
-        "lambda_medium": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_MEDIUM", "0.0")),
         "vmaf_max": float(os.environ.get("VIDEO_ENCODE_REWARD_VMAF_MAX", "100")),
         "bitrate_max_kbps": float(os.environ.get("VIDEO_ENCODE_REWARD_BITRATE_MAX_KBPS", "20000")),
         "grader_medium_bitrate_cap_kbps": float(os.environ.get("VIDEO_ENCODE_GRADER_MEDIUM_BITRATE_CAP", "2000.0")),
@@ -561,7 +559,7 @@ class VideoEncodeEnvironment(Environment):
         # so the T̄ term has meaningful gradient for typical short segments.
         _raw_tmax = os.environ.get("VIDEO_ENCODE_REWARD_TIME_MAX_SEC")
         time_max_sec = float(_raw_tmax) if _raw_tmax else 3.0 * seg_len
-        reward, r_components = compute_segment_reward(
+        hard_reward, r_components = compute_segment_reward(
             vmaf=vmaf,
             ssim=ssim,
             encoding_time_sec=enc_time,
@@ -588,12 +586,20 @@ class VideoEncodeEnvironment(Environment):
             bitrate_cap_kbps=self._reward_cfg["grader_medium_bitrate_cap_kbps"],
             vmaf_max=self._reward_cfg["vmaf_max"],
         )
-        reward += (
-            self._reward_cfg["lambda_easy"] * g_easy
-            + self._reward_cfg["lambda_medium"] * g_medium
-        )
         r_components["easy_score"] = g_easy
         r_components["medium_score"] = g_medium
+        r_components["task_id"] = action.task_id
+        if action.task_id == "easy":
+            reward = g_easy
+        elif action.task_id == "medium":
+            reward = g_medium
+        else:  # "hard"
+            reward = hard_reward
+        
+        if reward <= 0.0:
+            reward = 0.0001
+        if reward == 1.0:
+            reward = 0.9999
         logger.debug("step: reward=%s components=%s", reward, r_components)
 
         self._segment_step_metrics.append(

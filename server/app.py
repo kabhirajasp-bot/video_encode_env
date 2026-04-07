@@ -88,7 +88,7 @@ def main() -> None:
         port = args.port
     else:
         port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, log_level="debug")
 
 
 if __name__ == "__main__":
