@@ -63,6 +63,19 @@ class VideoEncodeObservation(Observation):
             "upload time; empty dict if the file was not analyzed in this process."
         ),
     )
+    segment_analysis: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Per-segment features computed on the extracted reference clip for this step. "
+            "Always-present keys (may be None on probe failure): width, height, duration_sec, "
+            "fps, bitrate_kbps, file_size_bytes. "
+            "Complexity keys (when analysis succeeds): "
+            "luma_spatial_texture_complexity_EY (SI), temporal_complexity_h (TI), "
+            "mean_luma_brightness_LY. "
+            "Empty dict when no clip was extracted this step (e.g. reset, end-of-video, "
+            "or pre-extraction error)."
+        ),
+    )
     vmaf_score: Optional[float] = Field(default=None, description="VMAF pooled mean vs reference segment")
     ssim_score: Optional[float] = Field(default=None, description="SSIM All if VMAF unavailable")
     bitrate_kbps: Optional[float] = Field(default=None, description="Average bitrate of encoded output")

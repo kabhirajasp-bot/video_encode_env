@@ -327,3 +327,81 @@ def analyze_video(path: Path, *, complexity_timeout_sec: float = 120.0) -> dict[
         out[MEAN_LUMA_BRIGHTNESS_LY] = None
 
     return out
+
+
+def analyze_segment_clip(
+    path: Path,
+    *,
+    timeout: float | None = None,
+    compute_complexity: bool = True,
+) -> dict[str, Any]:
+    """
+    Per-segment features computed on an already-extracted reference clip.
+
+    Designed to be called on the short clip that the environment extracts before
+    encoding (the CRF-18 ultrafast reference), so the cost is low (~1–2 s for
+    a 3 s segment at 1080p).
+
+    Always-present keys (value may be ``None`` on probe failure):
+    - ``width``, ``height``         — frame dimensions
+    - ``duration_sec``              — clip duration from container metadata
+    - ``fps``                       — average frame rate
+    - ``bitrate_kbps``              — bitrate of the reference (CRF-18) extract
+    - ``file_size_bytes``           — byte size on disk
+
+    Keys added when ``compute_complexity=True`` (default):
+    - ``luma_spatial_texture_complexity_EY``  — spatial information (SI) via ``siti``
+    - ``temporal_complexity_h``               — temporal information (TI) via ``siti``
+    - ``mean_luma_brightness_LY``             — mean per-frame luma (YAVG) via ``signalstats``
+
+    Reserved for future passes (not yet implemented; controlled by future keyword
+    arguments that will be added here):
+    - scene-cut count / flag        (``compute_scene_cuts``)
+    - I/P/B frame-type ratio        (``compute_frame_types``)
+    - quality-sensitivity baseline  (``compute_quality_baseline``)
+    """
+    out: dict[str, Any] = {}
+
+    try:
+        w, h = ffprobe_video_size(path)
+        out["width"] = w
+        out["height"] = h
+    except RuntimeError:
+        out["width"] = None
+        out["height"] = None
+
+    try:
+        out["duration_sec"] = ffprobe_duration_sec(path)
+    except RuntimeError:
+        out["duration_sec"] = None
+
+    out["fps"] = ffprobe_avg_frame_rate(path)
+
+    try:
+        out["bitrate_kbps"] = ffprobe_bitrate_kbps(path)
+    except RuntimeError:
+        out["bitrate_kbps"] = None
+
+    try:
+        out["file_size_bytes"] = path.stat().st_size
+    except OSError:
+        out["file_size_bytes"] = None
+
+    if compute_complexity:
+        # Cap the per-segment complexity pass at 30 s regardless of the global timeout.
+        # A well-extracted 3 s clip typically finishes well under 5 s.
+        complexity_timeout = min(30.0, float(timeout)) if timeout is not None else 30.0
+        try:
+            metrics = _run_ffmpeg_luma_complexity_metrics(
+                path,
+                complexity_timeout_sec=complexity_timeout,
+            )
+            out[LUMA_SPATIAL_TEXTURE_COMPLEXITY_EY] = metrics[LUMA_SPATIAL_TEXTURE_COMPLEXITY_EY]
+            out[TEMPORAL_COMPLEXITY_H] = metrics[TEMPORAL_COMPLEXITY_H]
+            out[MEAN_LUMA_BRIGHTNESS_LY] = metrics[MEAN_LUMA_BRIGHTNESS_LY]
+        except (TimeoutError, subprocess.TimeoutExpired, OSError):
+            out[LUMA_SPATIAL_TEXTURE_COMPLEXITY_EY] = None
+            out[TEMPORAL_COMPLEXITY_H] = None
+            out[MEAN_LUMA_BRIGHTNESS_LY] = None
+
+    return out

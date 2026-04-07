@@ -51,6 +51,7 @@ from openenv.core.env_server.types import State
 
 try:
     from ..models import VideoEncodeAction, VideoEncodeObservation
+    from .graders import easy_step_score, medium_step_score
     from .reward import compute_segment_reward
     from ..segment_utils import (
         encode_segment,
@@ -61,10 +62,11 @@ try:
         ssim_score,
         vmaf_score,
     )
-    from ..video_analysis import load_whole_video_analysis_for_observation
+    from ..video_analysis import analyze_segment_clip, load_whole_video_analysis_for_observation
     from ..video_paths import load_video_paths
 except ImportError:
     from models import VideoEncodeAction, VideoEncodeObservation
+    from server.graders import easy_step_score, medium_step_score
     from server.reward import compute_segment_reward
     from segment_utils import (
         encode_segment,
@@ -75,7 +77,7 @@ except ImportError:
         ssim_score,
         vmaf_score,
     )
-    from video_analysis import load_whole_video_analysis_for_observation
+    from video_analysis import analyze_segment_clip, load_whole_video_analysis_for_observation
     from video_paths import load_video_paths
 
 logger = logging.getLogger(__name__)
@@ -141,9 +143,12 @@ def _reward_config_from_env() -> dict[str, float]:
         "lambda_q": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_Q", "1.0")),
         "lambda_t": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_T", "0.5")),
         "lambda_s": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_S", "0.3")),
+        "lambda_c": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_C", "0.1")),
+        "lambda_easy": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_EASY", "0.0")),
+        "lambda_medium": float(os.environ.get("VIDEO_ENCODE_REWARD_LAMBDA_MEDIUM", "0.0")),
         "vmaf_max": float(os.environ.get("VIDEO_ENCODE_REWARD_VMAF_MAX", "100")),
-        "time_max_sec": float(os.environ.get("VIDEO_ENCODE_REWARD_TIME_MAX_SEC", "60")),
         "bitrate_max_kbps": float(os.environ.get("VIDEO_ENCODE_REWARD_BITRATE_MAX_KBPS", "20000")),
+        "grader_medium_bitrate_cap_kbps": float(os.environ.get("VIDEO_ENCODE_GRADER_MEDIUM_BITRATE_CAP", "2000.0")),
     }
 
 
@@ -230,6 +235,7 @@ class VideoEncodeEnvironment(Environment):
         encode_step_index: int,
         prev_segment_predictions: dict[str, Any] | None,
         whole_video_analysis: dict[str, Any],
+        segment_analysis: dict[str, Any] | None = None,
         vmaf_score: float | None,
         ssim_score: float | None,
         bitrate_kbps: float | None,
@@ -239,6 +245,7 @@ class VideoEncodeEnvironment(Environment):
         metadata: dict[str, Any] | None = None,
     ) -> VideoEncodeObservation:
         pp = copy.deepcopy(prev_segment_predictions)
+        sa = copy.deepcopy(segment_analysis) if segment_analysis is not None else {}
         return VideoEncodeObservation(
             echoed_message=echoed_message,
             num_videos=num_videos,
@@ -249,6 +256,7 @@ class VideoEncodeEnvironment(Environment):
             steps_per_segment=self._steps_per_segment,
             prev_segment_predictions=pp,
             whole_video_analysis=whole_video_analysis,
+            segment_analysis=sa,
             vmaf_score=vmaf_score,
             ssim_score=ssim_score,
             bitrate_kbps=bitrate_kbps,
@@ -432,6 +440,8 @@ class VideoEncodeEnvironment(Environment):
             start_sec,
             seg_len,
         )
+        # Populated after ref_clip extraction; {} on any pre-extraction failure path.
+        seg_analysis: dict[str, Any] = {}
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             ref_clip = tmp_path / "ref.mp4"
@@ -439,6 +449,7 @@ class VideoEncodeEnvironment(Environment):
             try:
                 extract_segment(ref_video, start_sec, seg_len, ref_clip, timeout=to)
                 ew, eh = ffprobe_video_size(ref_clip)
+                seg_analysis = analyze_segment_clip(ref_clip, timeout=to)
                 encode_budget = _encode_time_budget_sec(seg_len, to)
                 try:
                     enc_time = encode_segment(
@@ -467,6 +478,7 @@ class VideoEncodeEnvironment(Environment):
                         encode_step_index=encode_step_this,
                         prev_segment_predictions=prev_for_obs,
                         whole_video_analysis=whole_video_analysis,
+                        segment_analysis=seg_analysis,
                         vmaf_score=None,
                         ssim_score=None,
                         bitrate_kbps=None,
@@ -496,6 +508,7 @@ class VideoEncodeEnvironment(Environment):
                         encode_step_index=encode_step_this,
                         prev_segment_predictions=prev_for_obs,
                         whole_video_analysis=whole_video_analysis,
+                        segment_analysis=seg_analysis,
                         vmaf_score=None,
                         ssim_score=None,
                         bitrate_kbps=None,
@@ -530,6 +543,7 @@ class VideoEncodeEnvironment(Environment):
                     encode_step_index=encode_step_this,
                     prev_segment_predictions=prev_for_obs,
                     whole_video_analysis=whole_video_analysis,
+                    segment_analysis=seg_analysis,
                     vmaf_score=None,
                     ssim_score=None,
                     bitrate_kbps=None,
@@ -538,6 +552,15 @@ class VideoEncodeEnvironment(Environment):
                     metadata={"error": str(e)},
                 )
 
+        prev_crf_avg = (
+            self._prev_segment_summary.get("crf_avg")
+            if self._prev_segment_summary is not None
+            else None
+        )
+        # time_max_sec: use explicit env override if set, otherwise 3× the segment duration
+        # so the T̄ term has meaningful gradient for typical short segments.
+        _raw_tmax = os.environ.get("VIDEO_ENCODE_REWARD_TIME_MAX_SEC")
+        time_max_sec = float(_raw_tmax) if _raw_tmax else 3.0 * seg_len
         reward, r_components = compute_segment_reward(
             vmaf=vmaf,
             ssim=ssim,
@@ -546,10 +569,31 @@ class VideoEncodeEnvironment(Environment):
             lambda_q=self._reward_cfg["lambda_q"],
             lambda_t=self._reward_cfg["lambda_t"],
             lambda_s=self._reward_cfg["lambda_s"],
+            lambda_c=self._reward_cfg["lambda_c"],
+            crf=action.crf,
+            prev_crf_avg=prev_crf_avg,
             vmaf_max=self._reward_cfg["vmaf_max"],
-            time_max_sec=self._reward_cfg["time_max_sec"],
+            time_max_sec=time_max_sec,
             bitrate_max_kbps=self._reward_cfg["bitrate_max_kbps"],
         )
+        g_easy = easy_step_score(
+            vmaf=vmaf,
+            encoding_time_sec=enc_time,
+            segment_duration_sec=seg_len,
+            encode_aborted=False,
+        )
+        g_medium = medium_step_score(
+            vmaf=vmaf,
+            bitrate_kbps=bitrate,
+            bitrate_cap_kbps=self._reward_cfg["grader_medium_bitrate_cap_kbps"],
+            vmaf_max=self._reward_cfg["vmaf_max"],
+        )
+        reward += (
+            self._reward_cfg["lambda_easy"] * g_easy
+            + self._reward_cfg["lambda_medium"] * g_medium
+        )
+        r_components["easy_score"] = g_easy
+        r_components["medium_score"] = g_medium
         logger.debug("step: reward=%s components=%s", reward, r_components)
 
         self._segment_step_metrics.append(
@@ -597,6 +641,7 @@ class VideoEncodeEnvironment(Environment):
             encode_step_index=encode_step_this,
             prev_segment_predictions=prev_for_obs,
             whole_video_analysis=whole_video_analysis,
+            segment_analysis=seg_analysis,
             vmaf_score=vmaf,
             ssim_score=ssim,
             bitrate_kbps=bitrate,
