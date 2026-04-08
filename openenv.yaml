@@ -7,7 +7,7 @@ port: 8000
 
 
 tasks:
-  - id: task_easy
+  - id: task
     difficulty: easy
     max_steps: 10
     grader:

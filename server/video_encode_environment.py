@@ -62,7 +62,12 @@ try:
         ssim_score,
         vmaf_score,
     )
-    from ..video_analysis import analyze_segment_clip, load_whole_video_analysis_for_observation
+    from ..video_analysis import (
+        analyze_segment_clip,
+        analyze_video,
+        load_whole_video_analysis_for_observation,
+        store_whole_video_analysis,
+    )
     from ..video_paths import load_video_paths
 except ImportError:
     from models import VideoEncodeAction, VideoEncodeObservation
@@ -77,7 +82,12 @@ except ImportError:
         ssim_score,
         vmaf_score,
     )
-    from video_analysis import analyze_segment_clip, load_whole_video_analysis_for_observation
+    from video_analysis import (
+        analyze_segment_clip,
+        analyze_video,
+        load_whole_video_analysis_for_observation,
+        store_whole_video_analysis,
+    )
     from video_paths import load_video_paths
 
 logger = logging.getLogger(__name__)
@@ -184,6 +194,7 @@ class VideoEncodeEnvironment(Environment):
                 else None
             ),
         )
+        self._analyze_new_videos()
         self._segment_duration_sec = float(
             segment_duration_sec
             if segment_duration_sec is not None
@@ -212,6 +223,19 @@ class VideoEncodeEnvironment(Environment):
         self._prev_segment_summary: dict[str, Any] | None = None
         self._segment_step_metrics: list[dict[str, Any]] = []
 
+    def _analyze_new_videos(self) -> None:
+        """Run ``analyze_video`` on any path not yet in the in-process cache."""
+        timeout = float(os.environ.get("VIDEO_ENCODE_UPLOAD_ANALYSIS_TIMEOUT_SEC", "600"))
+        for path in self._video_paths:
+            if load_whole_video_analysis_for_observation(path):
+                continue  # already cached
+            try:
+                analysis = analyze_video(path, timeout=timeout)
+                store_whole_video_analysis(path, analysis)
+                logger.debug("Analyzed video for observation cache: %s", path.name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not analyze %s: %s", path.name, exc)
+
     def _reload_video_paths_from_disk(self) -> None:
         """Rescan ``VIDEO_ENCODE_VIDEOS_DIR`` / list file so runtime uploads are visible."""
         self._video_paths = load_video_paths(
@@ -222,6 +246,7 @@ class VideoEncodeEnvironment(Environment):
                 else None
             ),
         )
+        self._analyze_new_videos()
 
     def _observation(
         self,
