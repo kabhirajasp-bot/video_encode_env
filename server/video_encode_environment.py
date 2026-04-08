@@ -51,8 +51,7 @@ from openenv.core.env_server.types import State
 
 try:
     from ..models import VideoEncodeAction, VideoEncodeObservation
-    from .graders import easy_step_score, medium_step_score
-    from .reward import compute_segment_reward
+    from .graders import grader_easy, grader_hard, grader_medium
     from ..segment_utils import (
         encode_segment,
         extract_segment,
@@ -71,8 +70,7 @@ try:
     from ..video_paths import load_video_paths
 except ImportError:
     from models import VideoEncodeAction, VideoEncodeObservation
-    from server.graders import easy_step_score, medium_step_score
-    from server.reward import compute_segment_reward
+    from server.graders import grader_easy, grader_hard, grader_medium
     from segment_utils import (
         encode_segment,
         extract_segment,
@@ -580,46 +578,42 @@ class VideoEncodeEnvironment(Environment):
             if self._prev_segment_summary is not None
             else None
         )
-        # time_max_sec: use explicit env override if set, otherwise 3× the segment duration
-        # so the T̄ term has meaningful gradient for typical short segments.
-        _raw_tmax = os.environ.get("VIDEO_ENCODE_REWARD_TIME_MAX_SEC")
-        time_max_sec = float(_raw_tmax) if _raw_tmax else 3.0 * seg_len
-        hard_reward, r_components = compute_segment_reward(
-            vmaf=vmaf,
-            ssim=ssim,
-            encoding_time_sec=enc_time,
-            bitrate_kbps=bitrate,
-            lambda_q=self._reward_cfg["lambda_q"],
-            lambda_t=self._reward_cfg["lambda_t"],
-            lambda_s=self._reward_cfg["lambda_s"],
-            lambda_c=self._reward_cfg["lambda_c"],
-            crf=action.crf,
-            prev_crf_avg=prev_crf_avg,
-            vmaf_max=self._reward_cfg["vmaf_max"],
-            time_max_sec=time_max_sec,
-            bitrate_max_kbps=self._reward_cfg["bitrate_max_kbps"],
-        )
-        g_easy = easy_step_score(
-            vmaf=vmaf,
-            encoding_time_sec=enc_time,
-            segment_duration_sec=seg_len,
-            encode_aborted=False,
-        )
-        g_medium = medium_step_score(
-            vmaf=vmaf,
-            bitrate_kbps=bitrate,
-            bitrate_cap_kbps=self._reward_cfg["grader_medium_bitrate_cap_kbps"],
-            vmaf_max=self._reward_cfg["vmaf_max"],
-        )
-        r_components["easy_score"] = g_easy
-        r_components["medium_score"] = g_medium
-        r_components["task_id"] = action.task_id
+        r_components: dict[str, Any] = {"task_id": action.task_id}
         if action.task_id == "easy":
-            reward = g_easy
+            reward = grader_easy(
+                vmaf=vmaf,
+                encoding_time_sec=enc_time,
+                segment_duration_sec=seg_len,
+                encode_aborted=False,
+            )
         elif action.task_id == "medium":
-            reward = g_medium
+            reward = grader_medium(
+                vmaf=vmaf,
+                bitrate_kbps=bitrate,
+                bitrate_cap_kbps=self._reward_cfg["grader_medium_bitrate_cap_kbps"],
+                vmaf_max=self._reward_cfg["vmaf_max"],
+            )
         else:  # "hard"
-            reward = hard_reward
+            # time_max_sec: use explicit env override if set, otherwise 3× the segment duration
+            # so the T̄ term has meaningful gradient for typical short segments.
+            _raw_tmax = os.environ.get("VIDEO_ENCODE_REWARD_TIME_MAX_SEC")
+            time_max_sec = float(_raw_tmax) if _raw_tmax else 3.0 * seg_len
+            reward, r_components = grader_hard(
+                vmaf=vmaf,
+                ssim=ssim,
+                encoding_time_sec=enc_time,
+                bitrate_kbps=bitrate,
+                lambda_q=self._reward_cfg["lambda_q"],
+                lambda_t=self._reward_cfg["lambda_t"],
+                lambda_s=self._reward_cfg["lambda_s"],
+                lambda_c=self._reward_cfg["lambda_c"],
+                crf=action.crf,
+                prev_crf_avg=prev_crf_avg,
+                vmaf_max=self._reward_cfg["vmaf_max"],
+                time_max_sec=time_max_sec,
+                bitrate_max_kbps=self._reward_cfg["bitrate_max_kbps"],
+            )
+            r_components["task_id"] = action.task_id
         
         if reward <= 0.0:
             reward = 0.0001
