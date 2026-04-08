@@ -7,24 +7,24 @@ port: 8000
 
 
 tasks:
-  - id: task
+  - id: task_easy
     difficulty: easy
-    max_steps: 10
+    max_steps: 3
     grader:
-      type: llm
-      prompt_template: "Score this response 0.0 to 1.0 based on accuracy..."
+      type: function
+      grader_name: grader_easy
 
   - id: task_medium
     difficulty: medium
-    max_steps: 15
+    max_steps: 3
     grader:
-      type: llm
-      prompt_template: "Score this response 0.0 to 1.0 based on..."
+      type: function
+      grader_name: grader_easy
 
   - id: task_hard
     difficulty: hard
-    max_steps: 20
+    max_steps: 4
     grader:
-      type: llm
-      prompt_template: "Score this response 0.0 to 1.0 based on..."
+      type: function
+      grader_name: grader_hard
 

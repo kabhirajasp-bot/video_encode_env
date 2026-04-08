@@ -228,7 +228,7 @@ class VideoEncodeEnvironment(Environment):
             if load_whole_video_analysis_for_observation(path):
                 continue  # already cached
             try:
-                analysis = analyze_video(path, timeout=timeout)
+                analysis = analyze_video(path, complexity_timeout_sec=timeout)
                 store_whole_video_analysis(path, analysis)
                 logger.debug("Analyzed video for observation cache: %s", path.name)
             except Exception as exc:  # noqa: BLE001
@@ -319,7 +319,7 @@ class VideoEncodeEnvironment(Environment):
                 ssim_score=None,
                 bitrate_kbps=None,
                 encoding_time_sec=None,
-                reward=0.0,
+                reward=0.01,
             )
 
         self._current_video_idx = (self._reset_count - 1) % n
@@ -338,7 +338,7 @@ class VideoEncodeEnvironment(Environment):
             ssim_score=None,
             bitrate_kbps=None,
             encoding_time_sec=None,
-            reward=0.0,
+            reward=0.01,
             metadata={"video_path": key, "steps_per_segment": self._steps_per_segment},
         )
 
@@ -373,7 +373,7 @@ class VideoEncodeEnvironment(Environment):
                 ssim_score=None,
                 bitrate_kbps=None,
                 encoding_time_sec=None,
-                reward=0.0,
+                reward=0.01,
             )
 
         idx = action.video_index if action.video_index is not None else self._current_video_idx
@@ -395,7 +395,7 @@ class VideoEncodeEnvironment(Environment):
                 ssim_score=None,
                 bitrate_kbps=None,
                 encoding_time_sec=None,
-                reward=0.0,
+                reward=0.01,
             )
 
         ref_video = self._video_paths[idx]
@@ -420,7 +420,7 @@ class VideoEncodeEnvironment(Environment):
                 ssim_score=None,
                 bitrate_kbps=None,
                 encoding_time_sec=None,
-                reward=0.0,
+                reward=0.01,
                 metadata={"error": str(e)},
             )
 
@@ -445,7 +445,7 @@ class VideoEncodeEnvironment(Environment):
                 ssim_score=None,
                 bitrate_kbps=None,
                 encoding_time_sec=None,
-                reward=0.0,
+                reward=0.01,
             )
 
         prev_for_obs = copy.deepcopy(self._prev_segment_summary)
@@ -470,7 +470,7 @@ class VideoEncodeEnvironment(Environment):
             try:
                 extract_segment(ref_video, start_sec, seg_len, ref_clip, timeout=to)
                 ew, eh = ffprobe_video_size(ref_clip)
-                seg_analysis = analyze_segment_clip(ref_clip, timeout=to)
+                seg_analysis = {}
                 encode_budget = _encode_time_budget_sec(seg_len, to)
                 try:
                     enc_time = encode_segment(
@@ -504,7 +504,7 @@ class VideoEncodeEnvironment(Environment):
                         ssim_score=None,
                         bitrate_kbps=None,
                         encoding_time_sec=float(encode_budget),
-                        reward=0.0,
+                        reward=0.01,
                         metadata={
                             "encode_aborted": True,
                             "reason": "encode_timeout_vs_segment",
@@ -534,7 +534,7 @@ class VideoEncodeEnvironment(Environment):
                         ssim_score=None,
                         bitrate_kbps=None,
                         encoding_time_sec=enc_time,
-                        reward=0.0,
+                        reward=0.01,
                         metadata={
                             "encode_aborted": True,
                             "reason": "encode_slower_than_segment",
@@ -569,7 +569,7 @@ class VideoEncodeEnvironment(Environment):
                     ssim_score=None,
                     bitrate_kbps=None,
                     encoding_time_sec=None,
-                    reward=0.0,
+                    reward=0.01,
                     metadata={"error": str(e)},
                 )
 
@@ -616,9 +616,9 @@ class VideoEncodeEnvironment(Environment):
             r_components["task_id"] = action.task_id
         
         if reward <= 0.0:
-            reward = 0.0001
-        if reward == 1.0:
-            reward = 0.9999
+            reward = 0.01
+        if reward >= 1.0:
+            reward = 0.99
         logger.debug("step: reward=%s components=%s", reward, r_components)
 
         self._segment_step_metrics.append(

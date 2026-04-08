@@ -70,6 +70,9 @@ import re
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
+
+import yaml
 from typing import Any, List, Optional
 
 from openai import OpenAI
@@ -110,6 +113,9 @@ INFERENCE_DISABLE_THINKING = os.getenv("INFERENCE_DISABLE_THINKING", "1").strip(
 )
 SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.85"))
 
+# Set INFERENCE_DEBUG=1 to print observations, model replies, and other debug info to stdout.
+DEBUG = os.getenv("INFERENCE_DEBUG", "0").strip().lower() not in ("0", "false", "no")
+
 # Normalize score: assume typical |reward| per step ≤ this for rough [0,1] scaling
 _MAX_REWARD_ABS_PER_STEP = float(os.getenv("VIDEO_ENCODE_SCORE_MAX_ABS_REWARD_PER_STEP", "3.0"))
 
@@ -121,11 +127,33 @@ _DEFAULT_HF_SPACE_BASE_URL = os.getenv(
 
 _WS_MESSAGE_TIMEOUT_SEC = float(os.getenv("VIDEO_ENCODE_WS_MESSAGE_TIMEOUT_SEC", "600"))
 
-_PRINT_USER_PROMPT = os.getenv("VIDEO_ENCODE_PRINT_USER_PROMPT", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-)
+_PRINT_USER_PROMPT = False
+
+# Number of segment loops to run (each loop = one full pass over all tasks = steps_per_segment steps)
+NUM_SEGMENT_LOOPS = int(os.getenv("VIDEO_ENCODE_NUM_SEGMENT_LOOPS", "2"))
+
+# Path to openenv.yaml (resolved relative to this file's directory)
+_OPENENV_YAML = Path(__file__).parent / "openenv.yaml"
+
+
+def _load_tasks() -> list[dict]:
+    """Parse tasks from openenv.yaml; each entry has 'difficulty' and 'max_steps'."""
+    try:
+        with open(_OPENENV_YAML) as f:
+            data = yaml.safe_load(f)
+        tasks = data.get("tasks", [])
+        # Filter to entries that have both required fields
+        return [t for t in tasks if "difficulty" in t and "max_steps" in t]
+    except Exception as exc:
+        if DEBUG:
+            print(f"[DEBUG] Could not load {_OPENENV_YAML}: {exc}", flush=True)
+        # Fallback: one hard task with MAX_STEPS steps
+        return [{"difficulty": "hard", "max_steps": MAX_STEPS}]
+# _PRINT_USER_PROMPT = os.getenv("VIDEO_ENCODE_PRINT_USER_PROMPT", "1").strip().lower() not in (
+#     "0",
+#     "false",
+#     "no",
+# )
 
 
 class ExtendedReadyLocalDockerProvider(LocalDockerProvider):
@@ -279,24 +307,22 @@ def log_env_endpoint(
     repo_id: Optional[str],
 ) -> None:
     """Log where the Video Encode RL server is reached (HF Space URL, repo, local, or Docker)."""
+    if not DEBUG:
+        return
     if docker_image:
-        # print(f"[ENV] mode=docker_image image={docker_image}", flush=True)
-        pass
+        print(f"[ENV] mode=docker_image image={docker_image}", flush=True)
     elif repo_id:
-        # print(f"[ENV] mode=hf_repo repo_id={repo_id} (OpenEnv from_env)", flush=True)
-        pass
+        print(f"[ENV] mode=hf_repo repo_id={repo_id} (OpenEnv from_env)", flush=True)
     elif base_url:
-        # print(f"[ENV] mode=http url={base_url}", flush=True)
-        pass
+        print(f"[ENV] mode=http url={base_url}", flush=True)
     else:
-        # print("[ENV] mode=unknown", flush=True)
-        pass
+        print("[ENV] mode=unknown", flush=True)
 
 
 def log_user_prompt(step: int, user_prompt: str) -> None:
-    if not _PRINT_USER_PROMPT:
+    if not DEBUG or not _PRINT_USER_PROMPT:
         return
-    # print(f"[USER_PROMPT] step={step}\n{user_prompt}\n", flush=True)
+    print(f"[USER_PROMPT] step={step}\n{user_prompt}\n", flush=True)
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
@@ -466,7 +492,8 @@ def _completion_message_text(message: Any) -> tuple[str, str]:
     """
     if message is None:
         return "", ""
-    #print(f"[DEBUG] Model message: {message!r}", flush=True)
+    if DEBUG:
+        print(f"[DEBUG] Model message: {message!r}", flush=True)
     # 1) content (string or part list)
     c = _normalize_assistant_text_field(getattr(message, "content", None))
     if c:
@@ -517,11 +544,8 @@ def _chat_completion_create(client: OpenAI, **kwargs: Any) -> Any:
                 response_format={"type": "json_object"},
             )
         except Exception as exc:
-            # print(
-            #     f"[DEBUG] response_format json_object failed ({exc!r}); retrying without it",
-            #     flush=True,
-            # )
-            pass
+            if DEBUG:
+                print(f"[DEBUG] response_format json_object failed ({exc!r}); retrying without it", flush=True)
     return client.chat.completions.create(**kwargs)
 
 
@@ -537,7 +561,7 @@ def get_model_action(
     user_prompt = build_user_prompt(
         step, observation_dict, last_reward, history, max_tokens=MAX_TOKENS
     )
-    #log_user_prompt(step, user_prompt)
+    log_user_prompt(step, user_prompt)
     try:
         completion = _chat_completion_create(
             client,
@@ -555,31 +579,28 @@ def get_model_action(
         text, text_source = _completion_message_text(msg)
         text = text.strip()
         fr = getattr(choice, "finish_reason", None)
-        # print(
-        #     f"[DEBUG] Assistant text: source={text_source!r} chars={len(text)} finish_reason={fr!r}",
-        #     flush=True,
-        # )
+        # if DEBUG:
+        #     print(f"[DEBUG] Assistant text: source={text_source!r} chars={len(text)} finish_reason={fr!r}", flush=True)
         if not text:
             raise ValueError(
                 "empty assistant message: no text in content, reasoning, or other known fields"
             )
-        # if fr == "length":
-        #     print(
-        #         "[DEBUG] Stopped at max_tokens — JSON may be truncated. Increase MAX_TOKENS or shorten JSON.",
-        #         flush=True,
-        #     )
-        # if len(text) > 500:
-        #     print(f"[DEBUG] Model text (head): {text}...", flush=True)
-        # else:
-        #     print(f"[DEBUG] Model text: {text!r}", flush=True)
+        if DEBUG:
+            if fr == "length":
+                print("[DEBUG] Stopped at max_tokens — JSON may be truncated. Increase MAX_TOKENS or shorten JSON.", flush=True)
+            # if len(text) > 500:
+            #     print(f"[DEBUG] Model text (head): {text[:500]}...", flush=True)
+            # else:
+            #     print(f"[DEBUG] Model text: {text!r}", flush=True)
         return parse_model_output_to_action(text, num_videos, task_id)
     except Exception as exc:
-        # print(f"[DEBUG] Model request or parse failed: {exc}", flush=True)
-        # print(
-        #     "[DEBUG] Using fallback action: crf=23, preset=medium, video_index=0 "
-        #     "(or null when no videos). Fix MODEL_NAME/API_BASE_URL/HF_TOKEN or model output.",
-        #     flush=True,
-        # )
+        if DEBUG:
+            print(f"[DEBUG] Model request or parse failed: {exc}", flush=True)
+            print(
+                "[DEBUG] Using fallback action: crf=23, preset=medium, video_index=0 "
+                "(or null when no videos). Fix MODEL_NAME/API_BASE_URL/HF_TOKEN or model output.",
+                flush=True,
+            )
         return fallback_action(num_videos)
 
 
@@ -597,9 +618,8 @@ def _normalize_hf_space_url(url: str) -> str:
     nh = h.replace("_", "-")
     new_netloc = p.netloc.replace(h, nh, 1)
     out = urlunparse(p._replace(netloc=new_netloc)).rstrip("/")
-    if out != u.rstrip("/"):
-        pass
-        # print(f"[DEBUG] Normalized HF Space URL (use hyphens, not underscores): {u!r} -> {out!r}", flush=True)
+    if DEBUG and out != u.rstrip("/"):
+        print(f"[DEBUG] Normalized HF Space URL (use hyphens, not underscores): {u!r} -> {out!r}", flush=True)
     return out
 
 
@@ -673,20 +693,19 @@ def _history_line(step: int, action: VideoEncodeAction, reward: float) -> str:
 
 
 def _observation_error(obs: Any) -> Optional[str]:
-    md = getattr(obs, "metadata", None) or {}
-    if isinstance(md, dict) and md.get("error"):
-        return str(md["error"])
+    msg = getattr(obs, "echoed_message", None) or ""
+    if msg and msg != "ok":
+        return msg
     return None
 
 
 async def run_inference(args: argparse.Namespace) -> None:
-    if not API_KEY:
-        # print(
-        #     "Warning: Set HF_TOKEN (or OPENAI_API_KEY) to your Hugging Face token for "
-        #     "google/flan-t5-small on router.huggingface.co — requests may fail without it.",
-        #     file=sys.stderr,
-        # )
-        pass
+    if not API_KEY and DEBUG:
+        print(
+            "Warning: Set HF_TOKEN (or OPENAI_API_KEY) to your Hugging Face token for "
+            "the model on router.huggingface.co — requests may fail without it.",
+            file=sys.stderr,
+        )
 
     # HF router accepts Bearer token; placeholder only for local smoke without network.
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "hf")
@@ -704,14 +723,8 @@ async def run_inference(args: argparse.Namespace) -> None:
         from_env_ready = 600.0
 
     env: VideoEncodeEnv | None = None
-    max_steps = max(0, args.max_steps)
-    rewards: List[float] = []
-    steps_taken = 0
-    score = 0.0
-    success = False
     history: List[str] = []
 
-    log_start(task=TASK_NAME, env_name=BENCHMARK, model=MODEL_NAME)
     log_env_endpoint(docker_image, base_url, repo_id)
 
     try:
@@ -726,72 +739,80 @@ async def run_inference(args: argparse.Namespace) -> None:
         obs = result.observation
         last_reward = float(result.reward or 0.0)
 
-        episode_policy = {
-            "easy": [0.0,0.5],
-            "medium": [0.5,0.8],
-            "hard": [0.8,1.0]
-        }
+        tasks = _load_tasks()
+        global_step = 0
+        done = False
 
-
-        for step in range(1, max_steps + 1):
-            percent_idx = step / (max_steps+1)
-            task_id = "easy"
-            for task, pc in episode_policy.items():
-                if pc[0] <= percent_idx <= pc[1]:
-                    task_id = task
-                    break
-
-            
-            if getattr(result, "done", False):
-                break
-
-            obs_dict = obs.model_dump()
-            # print(obs_dict)
-            action = get_model_action(
-                client,
-                step,
-                obs_dict,
-                last_reward,
-                history,
-                obs.num_videos,
-                task_id
-            )
-            action_str = _action_to_log_str(action)
-
-            result = await env.step(action)
-            obs = result.observation
-            reward = float(result.reward if result.reward is not None else 0.00001)
-            done = bool(result.done)
-            err = _observation_error(obs)
-
-            rewards.append(reward)
-            steps_taken = step
-            last_reward = reward
-
-            log_step(step=step, action=action_str, reward=reward, done=done, error=err)
-
-            history.append(_history_line(step, action, reward))
-
+        for _seg in range(NUM_SEGMENT_LOOPS):
             if done:
                 break
+            for task in tasks:
+                if done:
+                    break
+                task_id: str = task["difficulty"]
+                task_name: str = task.get("id", task_id)
+                task_rewards: List[float] = []
+                task_step = 0
+                task_success = False
 
-        mean_r = sum(rewards) / len(rewards)
-        # Map roughly into [0,1] using typical scale (tunable via env)
-        score = abs(mean_r)
-        score = min(max(score, 0.0), 1.0)
-        success = True
+                log_start(task=task_name, env_name=BENCHMARK, model=MODEL_NAME)
+
+                try:
+                    for _ in range(task["max_steps"]):
+                        global_step += 1
+                        task_step += 1
+
+                        if getattr(result, "done", False):
+                            done = True
+                            break
+
+                        obs_dict = obs.model_dump()
+                        if DEBUG:
+                            print(f"[DEBUG] Observation: {json.dumps(obs_dict, indent=2, default=str)}", flush=True)
+                        action = get_model_action(
+                            client,
+                            global_step,
+                            obs_dict,
+                            last_reward,
+                            history,
+                            obs.num_videos,
+                            task_id,
+                        )
+                        action_str = _action_to_log_str(action)
+
+                        result = await env.step(action)
+                        obs = result.observation
+                        reward = float(result.reward if result.reward is not None else 0.00001)
+                        done = bool(result.done)
+                        err = _observation_error(obs)
+
+                        task_rewards.append(reward)
+                        last_reward = reward
+
+                        log_step(step=task_step, action=action_str, reward=reward, done=done, error=err)
+                        history.append(_history_line(global_step, action, reward))
+
+                        if done:
+                            break
+
+                    task_success = True
+                except Exception as task_exc:
+                    if DEBUG:
+                        print(f"[DEBUG] task {task_name} error: {task_exc}", flush=True)
+
+                task_score = min(max(abs(sum(task_rewards) / len(task_rewards)), 0.0), 1.0) if task_rewards else 0.0
+                log_end(success=task_success, steps=task_step, score=task_score, rewards=task_rewards)
 
     except Exception as e:
-        # print(f"[DEBUG] inference loop error: {e}", flush=True)
-        success = False
+        if DEBUG:
+            print(f"[DEBUG] inference loop error: {e}", flush=True)
     finally:
         if env is not None:
             try:
                 await env.close()
             except Exception as e:
-                pass
-                # print(f"[DEBUG] env.close() error: {e}", flush=True)
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+                if DEBUG:
+                    print(f"[DEBUG] env.close() error: {e}", flush=True)
 
 
 def main() -> int:
@@ -823,7 +844,8 @@ def main() -> int:
     try:
         asyncio.run(run_inference(args))
     except ValueError as e:
-        # print(f"Error: {e}", file=sys.stderr)
+        if DEBUG:
+            print(f"Error: {e}", file=sys.stderr)
         return 2
     return 0
 

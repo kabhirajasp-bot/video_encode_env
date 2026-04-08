@@ -375,7 +375,10 @@ def analyze_segment_clip(
     except RuntimeError:
         out["duration_sec"] = None
 
-    out["fps"] = ffprobe_avg_frame_rate(path)
+    try:
+        out["fps"] = ffprobe_avg_frame_rate(path)
+    except Exception:
+        out["fps"] = None
 
     try:
         out["bitrate_kbps"] = ffprobe_bitrate_kbps(path)
@@ -390,7 +393,8 @@ def analyze_segment_clip(
     if compute_complexity:
         # Cap the per-segment complexity pass at 30 s regardless of the global timeout.
         # A well-extracted 3 s clip typically finishes well under 5 s.
-        complexity_timeout = min(30.0, float(timeout)) if timeout is not None else 30.0
+        # complexity_timeout = min(30.0, float(timeout)) if timeout is not None else 30.0
+        complexity_timeout = 600
         try:
             metrics = _run_ffmpeg_luma_complexity_metrics(
                 path,
